@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 
-/* Explicit location fallback */
+/* Location Fallback */
 const getExplicitLocation = (tags = {}) =>
   tags["addr:city"] ||
   tags["addr:suburb"] ||
@@ -16,69 +17,67 @@ export default function FindHospitals() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  /* Fetch hospitals by coordinates */
+  const [searchParams] = useSearchParams();
+
+  /* Fetch Hospitals */
   const fetchHospitals = async (lat, lon) => {
     try {
       setLoading(true);
       setError("");
 
+      const radius = 5000;
+
       const overpassQuery = `
-        [out:json];
+        [out:json][timeout:8];
         (
-          node["amenity"="hospital"](around:5000,${lat},${lon});
-          node["amenity"="clinic"](around:5000,${lat},${lon});
+          node["amenity"="hospital"](around:${radius},${lat},${lon});
+          node["amenity"="clinic"](around:${radius},${lat},${lon});
         );
-        out body;
+        out body 15;
       `;
 
       const res = await fetch(
-        "https://overpass-api.de/api/interpreter",
-        { method: "POST", body: overpassQuery }
+        "https://overpass.kumi.systems/api/interpreter",
+        {
+          method: "POST",
+          body: overpassQuery,
+        }
       );
 
+      if (!res.ok) {
+        throw new Error("Failed");
+      }
+
       const data = await res.json();
-      setHospitals(data.elements);
-    } catch {
-      setError("Failed to fetch hospitals.");
+
+      setHospitals(data.elements || []);
+
+    } catch (err) {
+      console.log(err);
+
+      setError("Unable to fetch hospitals.");
     } finally {
       setLoading(false);
     }
   };
 
-  /* 1️⃣ On page load → get user location */
-  useEffect(() => {
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const { latitude, longitude } = pos.coords;
-        setCoords({ lat: latitude, lon: longitude });
-
-        /* Reverse geocode user location */
-        const res = await fetch(
-          `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`
-        );
-        const data = await res.json();
-        setLocationLabel(data.display_name);
-
-        fetchHospitals(latitude, longitude);
-      },
-      () => {
-        setError("Location access denied. Please search manually.");
-        setLoading(false);
-      }
-    );
-  }, []);
-
-  /* 2️⃣ Search location manually */
+  /* Search Function */
   const handleSearch = async () => {
-    if (!query) return;
+    if (!query.trim()) return;
 
     try {
       setLoading(true);
+      setError("");
       setHospitals([]);
 
       const res = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${query}`
+        `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${query}`
       );
+
+      if (!res.ok) {
+        throw new Error("Search failed");
+      }
+
       const data = await res.json();
 
       if (!data.length) {
@@ -88,99 +87,225 @@ export default function FindHospitals() {
       }
 
       const { lat, lon, display_name } = data[0];
+
       setCoords({ lat, lon });
+
       setLocationLabel(display_name);
 
-      fetchHospitals(lat, lon);
-    } catch {
+      await fetchHospitals(lat, lon);
+
+    } catch (err) {
+      console.log(err);
+
       setError("Search failed.");
       setLoading(false);
     }
   };
 
+  /* Auto Load Nearby Hospitals */
+  useEffect(() => {
+    const search = searchParams.get("search");
+
+    if (search) {
+      setQuery(search);
+      return;
+    }
+
+    if (!navigator.geolocation) {
+      setError("Geolocation not supported.");
+      setLoading(false);
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+
+      async (pos) => {
+        const { latitude, longitude } = pos.coords;
+
+        setCoords({
+          lat: latitude,
+          lon: longitude,
+        });
+
+        setLocationLabel("Nearby Hospitals");
+
+        await fetchHospitals(latitude, longitude);
+      },
+
+      async () => {
+        /* Default Hyderabad Location */
+        const defaultLat = 17.385;
+        const defaultLon = 78.4867;
+
+        setLocationLabel("Hyderabad");
+
+        await fetchHospitals(defaultLat, defaultLon);
+      },
+
+      {
+        enableHighAccuracy: false,
+        timeout: 5000,
+        maximumAge: 300000,
+      }
+    );
+
+  }, []);
+
+  /* Auto Search Query */
+  useEffect(() => {
+    if (query) {
+      handleSearch();
+    }
+  }, [query]);
+
   return (
     <section className="min-h-screen bg-gray-50">
+
       <div className="max-w-7xl mx-auto px-4 py-12">
 
+        {/* Heading */}
         <h1 className="text-3xl font-bold text-gray-900 mb-4">
           Find Hospitals
         </h1>
 
         {/* Search Bar */}
         <div className="flex flex-col sm:flex-row gap-3 mb-6">
+
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                handleSearch();
+              }
+            }}
             placeholder="Search city, area, or location"
             className="flex-1 px-4 py-3 border rounded-md focus:ring-2 focus:ring-blue-600"
           />
+
           <button
             onClick={handleSearch}
             className="px-6 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700"
           >
             Search
           </button>
+
         </div>
 
-        {/* Location Label */}
+        {/* Location */}
         {locationLabel && (
-          <p className="text-gray-600 mb-4">
+          <p className="text-gray-600 mb-6">
             Showing hospitals near{" "}
-            <span className="font-semibold">{locationLabel}</span>
+            <span className="font-semibold">
+              {locationLabel}
+            </span>
           </p>
         )}
 
-        {/* States */}
-        {loading && <p className="text-gray-600">Loading hospitals...</p>}
-        {error && <p className="text-red-600">{error}</p>}
+        {/* Loading */}
+        {loading && (
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+
+            {[...Array(6)].map((_, i) => (
+              <div
+                key={i}
+                className="bg-white p-6 rounded-xl shadow animate-pulse"
+              >
+
+                <div className="h-6 bg-gray-200 rounded w-3/4"></div>
+
+                <div className="h-4 bg-gray-200 rounded mt-4"></div>
+
+                <div className="h-4 bg-gray-200 rounded mt-2 w-1/2"></div>
+
+                <div className="h-10 bg-gray-200 rounded mt-6"></div>
+
+              </div>
+            ))}
+
+          </div>
+        )}
+
+        {/* Error */}
+        {error && (
+          <div className="mt-6">
+
+            <p className="text-red-600">
+              {error}
+            </p>
+
+            <button
+              onClick={() => window.location.reload()}
+              className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+            >
+              Retry
+            </button>
+
+          </div>
+        )}
 
         {/* Hospital Cards */}
-        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-          {hospitals.map((h) => (
-            <div
-              key={h.id}
-              className="bg-white p-6 rounded-xl shadow hover:shadow-lg"
-            >
-              <h2 className="text-xl font-semibold text-gray-800">
-                {h.tags?.name || "Unnamed Hospital"}
-              </h2>
+        {!loading &&
+          hospitals.length > 0 && (
 
-              <p className="text-gray-600 mt-2">
-                {getExplicitLocation(h.tags)}
-              </p>
+          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
 
-              <span className="inline-block mt-3 px-3 py-1 text-sm rounded-full bg-blue-100 text-blue-600">
-                {h.tags?.amenity}
-              </span>
+            {hospitals.map((h) => (
 
-              <div className="mt-4 flex justify-between">
-                <a
-                  href={`https://www.google.com/maps?q=${h.lat},${h.lon}`}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-blue-600 hover:underline"
-                >
-                Directions
-                </a>
+              <div
+                key={h.id}
+                className="bg-white p-6 rounded-xl shadow hover:shadow-lg transition"
+              >
 
-                {h.tags?.phone && (
+                <h2 className="text-xl font-semibold text-gray-800">
+                  {h.tags?.name || "Unnamed Hospital"}
+                </h2>
+
+                <p className="text-gray-600 mt-2">
+                  {getExplicitLocation(h.tags)}
+                </p>
+
+                <span className="inline-block mt-3 px-3 py-1 text-sm rounded-full bg-blue-100 text-blue-600">
+                  {h.tags?.amenity}
+                </span>
+
+                <div className="mt-5 flex justify-between items-center">
+
                   <a
-                    href={`tel:${h.tags.phone}`}
+                    href={`https://www.google.com/maps?q=${h.lat},${h.lon}`}
+                    target="_blank"
+                    rel="noreferrer"
                     className="text-blue-600 hover:underline"
                   >
-                    Call
+                    Directions
                   </a>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
 
-        {!loading && hospitals.length === 0 && !error && (
-          <p className="text-gray-600 mt-6">
-            No hospitals found nearby.
-          </p>
+                  {h.tags?.phone && (
+                    <a
+                      href={`tel:${h.tags.phone}`}
+                      className="text-blue-600 hover:underline"
+                    >
+                      Call
+                    </a>
+                  )}
+
+                </div>
+
+              </div>
+            ))}
+
+          </div>
         )}
+
+        {/* Empty State */}
+        {!loading &&
+          hospitals.length === 0 &&
+          !error && (
+            <p className="text-gray-600 mt-6">
+              No hospitals found nearby.
+            </p>
+          )}
+
       </div>
     </section>
   );
